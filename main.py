@@ -81,6 +81,14 @@ name_tags = [
     'alt_name'
 ]
 
+DEFAULT_TAGS = {
+    'maxheight': None,
+    'maxweight': None,
+    'maxwidth': None,
+    'maxaxleload': None,
+    'roadowner': None,
+    'owner_id': None
+}
 
 def overpass_query(region, value):
     api = overpy.Overpass()
