@@ -14,55 +14,38 @@ For every value in the 'ref', 'nat_ref', 'name' tags
  
  TODO 
     OverPass API instead of quickosm
-        - rewrite functions to handle overpy result objects
-        - remove QGIS and process logic
+        -> recreate geometrie
+        -> no layers
  """
 import sys
 from pathlib import Path
-from qgis.core import (
-    QgsProject,
-    QgsFeatureRequest,
-    QgsFields,
-    QgsField,
-    QgsFeature,
-    QgsVectorFileWriter,
-    QgsApplication
-)
-from qgis.analysis import QgsNativeAlgorithms
-from qgis.core import QgsProcessingFeedback
-from PyQt5.QtCore import QVariant
-import pandas as pd
 import overpy
+import json
+import time
 
-QGIS_PYTHON_PATH = Path("/usr/share/qgis/python")  # Typical location for QGIS python modules on Linux
-PROCESSING_PLUGIN_PATH = QGIS_PYTHON_PATH / "plugins"
-
-# Add paths to sys.path (convert Path to str)
-sys.path.append(str(QGIS_PYTHON_PATH))
-sys.path.append(str(PROCESSING_PLUGIN_PATH))
 BASE_DIR = Path("/home/psc/Desktop/Portfolio/Trasporti_Eccezionali/DB/QGIS")
 
 # Relation ids to bound queries spatially
 regions = {
-    'Sicilia': 39152
-    'Puglia': 40095
-    'Basilicata': 40137
-    'Campania': 40218
-    'Lazio': 40784
-    'Molise': 41256
-    'Toscana': 41977
-    'Umbria': 42004
-    'Emilia-Romagna': 42611
-    'Veneto': 43648
-    'Piemonte': 44874
-    'Lombardia': 44879
-    'Valle d\'Aosta': 45155
-    'Trentino-Alto Adige': 45757
-    'Marche': 53060
-    'Abruzzo': 53937
-    'Friuli-Venezia Giulia': 179296
-    'Liguria': 301482
-    'Calabria': 1783980
+    'Sicilia': 39152,
+    'Puglia': 40095,
+    'Basilicata': 40137,
+    'Campania': 40218,
+    'Lazio': 40784,
+    'Molise': 41256,
+    'Toscana': 41977,
+    'Umbria': 42004,
+    'Emilia-Romagna': 42611,
+    'Veneto': 43648,
+    'Piemonte': 44874,
+    'Lombardia': 44879,
+    'Valle d\'Aosta': 45155,
+    'Trentino-Alto Adige': 45757,
+    'Marche': 53060,
+    'Abruzzo': 53937,
+    'Friuli-Venezia Giulia': 179296,
+    'Liguria': 301482,
+    'Calabria': 1783980,
     'Sardegna': 7361997
 }
 
@@ -98,11 +81,19 @@ def overpass_query(region, value):
         relation(area.italy)["admin_level"="4"]["name"={region}]["boundary"="administrative"];
         out ids;
     """
-    result_region = api.query(query_region)
 
-    # Extract the area ID for Toscana
+    # Extract the area ID for region
+    try:
+        result_region = api.query(query_region)
+        if not result_region.relations:
+            print(f"[WARNING] No relation found for region '{region}'")
+            return None
+        relation_id = result_region.relations[0].id
+    except Exception as e:
+        print(f"[ERROR] Failed to retrieve region '{region}': {e}")
+        return None
+
     # The area ID for Overpass queries is 3600000000 + relation.id
-    relation_id = result_region.relations[0].id
     area_id = 3600000000 + relation_id
 
     # Step 2: Query all primary highways in the region
@@ -118,70 +109,90 @@ def overpass_query(region, value):
     # overpy result object has to be serialized for geojson output
     return result_highways
 
-def serialize_overpass_result(result):
-    serializable_data = {
-        "ways": [],
-        "nodes": [],
-        "relations": []
-    }
+def save_geojson(ways, nodes, filepath):
+    """
+    Save a GeoJSON file with LineString features for ways and Point features for nodes.
     
-    # Convert ways to serializable format
-    for way in result.ways:
-        serializable_data["ways"].append({
-            "id": way.id,
-            "nodes": [node.id for node in way.nodes],
-            "tags": way.tags
-        })
-    
-    # Convert nodes to serializable format
-    for node in result.nodes:
-        serializable_data["nodes"].append({
-            "id": node.id,
-            "lat": float(node.lat),
-            "lon": float(node.lon),
-            "tags": node.tags if hasattr(node, 'tags') else {}
-        })
-    
-    # Convert relations to serializable format (if needed)
-    for relation in result.relations:
-        serializable_data["relations"].append({
-            "id": relation.id,
-            "tags": relation.tags,
-            "members": [{
-                "type": member.type,
-                "ref": member.ref,
-                "role": member.role
-            } for member in relation.members]
-        })
-    return serializable_data
+    Args:
+        ways (list): A list of overpy.Way objects.
+        nodes (list): A list of overpy.Node objects.
+        filename (str or Path): File path for the output .geojson
+    """
+    features = []
 
-def save_geojson(result, filename):
-    serialized_result = serialize_overpass_result(result)
-    with open(filename, "w") as f:
-        json.dump(serialized_result, f, indent=2)
+    # Build a dict of node_id → (lon, lat)
+    node_dict = {node.id: (float(node.lon), float(node.lat)) for node in nodes}
+
+    # Process ways
+    for way in ways:
+        coords = [node_dict[node.id] for node in way.nodes if node.id in node_dict]
+        if len(coords) < 2:
+            continue 
+
+        tags = way.tags.copy()
+        tags.update({k: v for k, v in DEFAULT_TAGS.items() if k not in tags})
+
+        features.append({
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coords
+            },
+            "properties": tags
+        })
+
+    # Process nodes (optional: only save those with tags or relevance)
+    for node in nodes:
+        tags = node.tags.copy()
+        tags.update({k: v for k, v in DEFAULT_TAGS.items() if k not in tags})
+
+        features.append({
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [float(node.lon), float(node.lat)]
+            },
+            "properties": tags
+        })
+
+    geojson = {
+        "type": "FeatureCollection",
+        "features": features,
+        "crs": {
+            "type": "name",
+            "properties": {
+                "name": "urn:ogc:def:crs:OGC:1.3:CRS84"
+            }
+        }
+    }
+
+    with open(filepath, "w") as f:
+        json.dump(geojson, f, indent=2)
+
+    print(f"[INFO] Saved: {filepath}")
+
 
 
 def find_names(overpass_result):
     road_names = set()
-    for way in enumerate(overpass_result.ways):
+    for way in overpass_result.ways:
         for tag in name_tags:
-            try:
-                value = way.tags['highway']
-            except:
-                pass
-            if value:
-                road_names.add(value, tag)
+            if tag in way.tags:
+                road_names.add(way.tags[tag])
     return road_names
 
-def extract_roads(names, region, result):
+
+def extract_roads(names, region, tag, result):
     for name in names:
         # Filter ways that have this name in any of the name tags
         ways = []
         for way in result.ways:
-            for tag in name_tags:
-                if tag in way.tags and way.tags[tag] == name:
+            for name_tag in name_tags:
+                if name_tag in way.tags and way.tags[name_tag] == name:
                     ways.append(way)
                     break  # No need to check other tags if we found a match
+        if not ways:
+            continue
         
         # Get all nodes referenced by these ways
         way_node_ids = set()
@@ -196,43 +207,31 @@ def extract_roads(names, region, result):
                 nodes.append(node)
                 continue
             # Or if it's directly tagged with this name
-            for tag in name_tags:
-                if tag in getattr(node, 'tags', {}) and node.tags[tag] == name:
+            for name_tag in name_tags:
+                if name_tag in getattr(node, 'tags', {}) and node.tags[name_tag] == name:
                     nodes.append(node)
                     break
-        
-        # Create a new result-like structure
-        new_road = {
-            "ways": ways,
-            "nodes": nodes,
-            "relations": []  # You can add relation filtering if needed
-        }
-        
+
         # Save to file
-        dir_path = Path(region) / name
-        file_name = f"{name}.gpkg"  # Fixed the filename to use actual name
+        dir_path = BASE_DIR / Path(region) / tag
+        safe_name = name.replace('/', '_').replace(' ', '_')
+        file_name = f"{safe_name}.geojson"
         file_path = dir_path / file_name
         dir_path.mkdir(parents=True, exist_ok=True)
-        save_geojson(new_road, file_path)
+        save_geojson(ways, nodes, file_path)
 
 def main():
-    QGIS_PREFIX_PATH = "/usr"
-    qgs = QgsApplication([], False)
-    qgs.setPrefixPath(QGIS_PREFIX_PATH, True)
-    qgs.initQgis()
-
-   
-    from processing.core.Processing import Processing
-
-    Processing.initialize()
-    qgs.processingRegistry().addProvider(QgsNativeAlgorithms())
-
     for region in regions:
-        road_network = download_data(region)
-        for layer in road_network:
-            extract_roads(layer)
+        for tag in highway_tags:
+            print(f"[INFO] Processing region '{region}', highway type '{tag}'")
+            road_network = overpass_query(region, tag)
+            if road_network is None:
+                continue
+            road_names = find_names(road_network)
+            extract_roads(road_names, region, tag, road_network)
+            time.sleep(5)
+        time.sleep(15)
 
-    qgs.exitQgis()
 
 if __name__ == "__main__":
     main()
