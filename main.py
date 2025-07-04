@@ -165,57 +165,47 @@ def find_names(overpass_result):
                 road_names.add(value, tag)
     return road_names
 
-def extract_roads(input_layer, region):
-    csv_path = "custom_table.csv"
-    df = pd.read_csv(csv_path)
-    custom_field_names = df.columns.tolist()
-
-    output_fields = QgsFields()
-    existing_field_names = [field.name() for field in input_layer.fields()]
-    for field in input_layer.fields():
-        output_fields.append(field)
-
-    for name in custom_field_names:
-        if name not in existing_field_names:
-            output_fields.append(QgsField(name, QVariant.String)) 
-    
-    geometry_type = input_layer.wkbType()
-    crs = input_layer.crs()
-
-    road_names = find_names(input_layer)
-    for (value, tag) in road_names:
-
-        dir_path = Path(region) / value
-        file_name = f"{tag}_{geometry_type}.gpkg"
+def extract_roads(names, region, result):
+    for name in names:
+        # Filter ways that have this name in any of the name tags
+        ways = []
+        for way in result.ways:
+            for tag in name_tags:
+                if tag in way.tags and way.tags[tag] == name:
+                    ways.append(way)
+                    break  # No need to check other tags if we found a match
+        
+        # Get all nodes referenced by these ways
+        way_node_ids = set()
+        for way in ways:
+            way_node_ids.update(node.id for node in way.nodes)
+        
+        # Filter nodes that are either tagged with this name or part of these ways
+        nodes = []
+        for node in result.nodes:
+            # Include if it's part of any way with this name
+            if node.id in way_node_ids:
+                nodes.append(node)
+                continue
+            # Or if it's directly tagged with this name
+            for tag in name_tags:
+                if tag in getattr(node, 'tags', {}) and node.tags[tag] == name:
+                    nodes.append(node)
+                    break
+        
+        # Create a new result-like structure
+        new_road = {
+            "ways": ways,
+            "nodes": nodes,
+            "relations": []  # You can add relation filtering if needed
+        }
+        
+        # Save to file
+        dir_path = Path(region) / name
+        file_name = f"{name}.gpkg"  # Fixed the filename to use actual name
         file_path = dir_path / file_name
         dir_path.mkdir(parents=True, exist_ok=True)
-        layer_name = f"{value}_{tag}"
-        writer = QgsVectorFileWriter.create(
-            str(file_path),
-            output_fields,
-            geometry_type,
-            crs,
-            "utf-8",
-            driverName="GPKG",
-            layerName=layer_name
-        )
-
-        expression = f'{tag} = \'{value}\''
-        request = QgsFeatureRequest().setFilterExpression(expression)
-
-        for feature in input_layer.getFeatures(request):
-            new_feat = QgsFeature()
-            new_feat.setGeometry(feature.geometry())
-            # Get original attributes as a dictionary
-            attr_dict = dict(zip(existing_field_names, feature.attributes()))
-            # Prepare extended attributes
-            new_attrs = [attr_dict.get(name, None) for name in existing_field_names]
-            extra_attrs = [attr_dict.get(name, None) if name in attr_dict else None for name in custom_field_names if name not in existing_field_names]
-            new_feat.setAttributes(new_attrs + extra_attrs)
-            writer.addFeature(new_feat)
-
-        # Cleanup
-        del writer
+        save_geojson(new_road, file_path)
 
 def main():
     QGIS_PREFIX_PATH = "/usr"
