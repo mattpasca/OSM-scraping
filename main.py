@@ -13,17 +13,16 @@ For every value in the 'ref', 'nat_ref', 'name' tags
   - owner_id
  
  TODO 
-    OverPass API instead of quickosm
-        -> recreate geometrie
-        -> no layers
+    Implement functions for barriers (toll_booth)
  """
 import sys
 from pathlib import Path
 import overpy
 import json
 import time
+import random
 
-BASE_DIR = Path("/home/psc/Desktop/Portfolio/Trasporti_Eccezionali/DB/QGIS")
+BASE_DIR = Path("/home/psc/Desktop/Portfolio/Trasporti_Eccezionali/DB/QGIS/script")
 
 # Relation ids to bound queries spatially
 regions = {
@@ -51,17 +50,18 @@ regions = {
 
 highway_tags = [
     'motorway',
-    'trunk',
-    'primary',
-    'secondary',
-    'tertiary'
+    'motorway_link',
+    'motorway_service'
 ]
 
 name_tags = [
     'ref',
     'nat_ref',
     'reg_ref',
-    'alt_name'
+    'alt_name',
+    'name',
+    'old_name',
+    'old_ref'
 ]
 
 DEFAULT_TAGS = {
@@ -73,12 +73,25 @@ DEFAULT_TAGS = {
     'owner_id': None
 }
 
+OVERPASS_SERVERS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter"
+]
+
+def get_overpass_instance():
+    """Return an Overpass API instance with a random server"""
+    server = random.choice(OVERPASS_SERVERS)
+    print(f"[INFO] Using Overpass server: {server}")
+    return overpy.Overpass(url=server)
+
 def overpass_query(region, value):
-    api = overpy.Overpass()
+    api = get_overpass_instance()
     query_region = f"""
         [out:json][timeout:25];
         area["ISO3166-1"="IT"][admin_level=2]->.italy;
-        relation(area.italy)["admin_level"="4"]["name"={region}]["boundary"="administrative"];
+        relation(area.italy)["admin_level"="4"]["name"="{region}"]["boundary"="administrative"];
         out ids;
     """
 
@@ -99,9 +112,12 @@ def overpass_query(region, value):
     # Step 2: Query all primary highways in the region
     query_highways = f"""
     [out:json][timeout:60];
-    way["highway"={value}](area:{area_id});
-    out body;
-    out geom;
+    area({area_id})->.searchArea;
+    (
+        way["highway"="{value}"](area.searchArea);
+        node(w);
+    );
+    out body geom;
     """
 
     # Run the highway query
@@ -221,16 +237,16 @@ def extract_roads(names, region, tag, result):
         save_geojson(ways, nodes, file_path)
 
 def main():
-    for region in regions:
-        for tag in highway_tags:
-            print(f"[INFO] Processing region '{region}', highway type '{tag}'")
-            road_network = overpass_query(region, tag)
-            if road_network is None:
-                continue
-            road_names = find_names(road_network)
-            extract_roads(road_names, region, tag, road_network)
-            time.sleep(5)
-        time.sleep(15)
+    region = sys.argv[1]
+    for tag in highway_tags:
+        print(f"[INFO] Processing region '{region}', highway type '{tag}'")
+        road_network = overpass_query(region, tag)
+        if road_network is None:
+            continue
+        road_names = find_names(road_network)
+        extract_roads(road_names, region, tag, road_network)
+        time.sleep(5)
+    time.sleep(15)
 
 
 if __name__ == "__main__":
